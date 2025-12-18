@@ -268,7 +268,12 @@ def create_test_page(doc, test_info, cfg, is_first_test=False, section_title=Non
     set_cell_border_and_shading(cell_lbl, border_settings=no_border, shading_color=COLOR_PRIMARY)
     set_cell_border_and_shading(cell_val, border_settings=no_border, shading_color=COLOR_PRIMARY)
     
-    doc.add_paragraph().paragraph_format.line_spacing = Pt(2) # Gap
+    # Gap minúsculo (1pt) apenas para separar as tabelas sem mesclar
+    p_gap_1 = doc.add_paragraph()
+    p_gap_1.paragraph_format.space_before = Pt(0)
+    p_gap_1.paragraph_format.space_after = Pt(0)
+    p_gap_1.paragraph_format.line_spacing = Pt(1)
+    p_gap_1.add_run().font.size = Pt(1)
 
     # Tabela FMEA
     table_info = doc.add_table(rows=1, cols=2); table_info.width = Inches(7.49); set_table_indent(table_info, indent_val=0)
@@ -291,7 +296,15 @@ def create_test_page(doc, test_info, cfg, is_first_test=False, section_title=Non
     set_cell_border_and_shading(c2, border_settings=box_border_settings, shading_color=COLOR_BG_UNIFIED)
 
     create_details_section(doc, test_info, cfg)
-    doc.add_paragraph().paragraph_format.line_spacing = Pt(2) # Gap
+    
+    # --- CORREÇÃO DO ESPAÇO INDESEJADO AQUI ---
+    # Substituímos o parágrafo de espaçamento padrão por um "ghost paragraph" de 1pt.
+    # Isso evita que o Word funda as tabelas, mas remove o espaço visual branco.
+    p_gap_footer = doc.add_paragraph()
+    p_gap_footer.paragraph_format.space_before = Pt(0)
+    p_gap_footer.paragraph_format.space_after = Pt(0)
+    p_gap_footer.paragraph_format.line_spacing = Pt(1) # Linha minúscula
+    p_gap_footer.add_run().font.size = Pt(1) # Fonte minúscula
 
     # Assinaturas
     table_wit = doc.add_table(rows=1, cols=2); table_wit.width = Inches(7.5); set_table_indent(table_wit, indent_val=-10)
@@ -371,6 +384,9 @@ def generate_professional_docx(uploaded_file, cfg):
     normal_style = doc.styles['Normal']
     normal_style.font.name = cfg['font_name']
     normal_style.font.size = Pt(cfg['body'])
+    # --- CORREÇÃO CRÍTICA: ZERAR ESPAÇAMENTO PADRÃO ---
+    normal_style.paragraph_format.space_before = Pt(0)
+    normal_style.paragraph_format.space_after = Pt(0) # Evita gaps automáticos do Word
     normal_style.paragraph_format.line_spacing = 1.15
 
     section = doc.sections[0]
