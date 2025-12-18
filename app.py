@@ -1,531 +1,481 @@
 import streamlit as st
 import pandas as pd
-import io
+import re
 import os
-import tempfile
-from PIL import Image
-
-# --- IMPORTS PARA DOCX ---
+import io
 from docx import Document
-from docx.shared import Pt, Inches, Cm, RGBColor
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.enum.section import WD_SECTION_START
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx2pdf import convert
-
-# --- IMPORTS PARA PDF ---
-from PyPDF2 import PdfReader, PdfWriter, PdfMerger
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.utils import ImageReader
 
 # ==========================================
-# 1. CONFIGURAÇÃO DA PÁGINA E CSS
+# CONFIGURAÇÃO DA PÁGINA STREAMLIT
 # ==========================================
 st.set_page_config(page_title="Gerador de Relatórios DP", layout="wide", page_icon="⚓")
 
-# CSS para visual corporativo (Azul Bram/Edison Chouest)
+# Estilo CSS para manter o padrão visual azul
 st.markdown("""
     <style>
-    :root { --primary-color: #0054a6; }
+    :root { --primary-color: #1F4E79; }
     div.stButton > button:first-child {
-        background-color: #0054a6;
+        background-color: #1F4E79;
         color: white;
         border-radius: 5px;
         border: none;
         font-weight: bold;
     }
-    div.stButton > button:hover { background-color: #003f7f; color: white; }
-    h1, h2, h3 { color: #333; font-family: 'Arial', sans-serif; }
-    .stSidebar { background-color: #f0f2f6; }
+    div.stButton > button:hover { background-color: #163a5c; color: white; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. BARRA LATERAL (CONFIGURAÇÕES)
+# CONSTANTES E CONFIGURAÇÕES DO DOCX
 # ==========================================
-st.sidebar.header("⚙️ Configurações do Documento")
+COLOR_PRIMARY = "1F4E79"
+COLOR_BORDER  = "BFBFBF"
+COLOR_BG_UNIFIED = "F2F2F2"
+COLOR_TEXT_MAIN = RGBColor(0x26, 0x26, 0x26)
+COLOR_TEXT_LABEL = RGBColor(0x1F, 0x4E, 0x79)
+COLOR_TEXT_PLACEHOLDER = RGBColor(89, 89, 89)
 
-# --- Configuração da Planilha ---
-st.sidebar.subheader("Excel / Planilha")
-sheet_input = st.sidebar.text_input(
-    "Nome ou Índice da Aba (Sheet Name)", 
-    value="0", 
-    help="Digite '0' para a primeira aba, ou o nome exato (ex: 'Planilha1')."
-)
+# Define o caminho da logo no repositório
+LOGO_PATH = 'logo.png' 
 
-# --- Configuração de Fontes ---
-st.sidebar.subheader("Tipografia")
-font_name_cfg = st.sidebar.selectbox("Fonte Principal", ["Raleway", "Arial", "Calibri", "Times New Roman"], index=0)
-font_size_h1 = st.sidebar.number_input("Tamanho Título (H1)", value=20, step=1)
-font_size_h2 = st.sidebar.number_input("Tamanho Subtítulo (H2)", value=14, step=1)
-font_size_body = st.sidebar.number_input("Tamanho Corpo", value=11, step=1)
-
-# --- Configuração de Margens ---
-st.sidebar.subheader("Margens (Polegadas)")
-col_m1, col_m2 = st.sidebar.columns(2)
-margin_top = col_m1.number_input("Topo", value=1.0, step=0.1)
-margin_bottom = col_m2.number_input("Rodapé", value=1.0, step=0.1)
-margin_left = col_m1.number_input("Esquerda", value=0.5, step=0.1)
-margin_right = col_m2.number_input("Direita", value=0.5, step=0.1)
-
-# Agrupando configurações
-CONFIG = {
-    "sheet_target": sheet_input,
-    "font_name": font_name_cfg,
-    "h1": font_size_h1,
-    "h2": font_size_h2,
-    "body": font_size_body,
-    "m_top": margin_top,
-    "m_bottom": margin_bottom,
-    "m_left": margin_left,
-    "m_right": margin_right
+# Configurações de Borda
+refined_border = {"sz": 8, "val": "single", "color": COLOR_BORDER}
+box_border_settings = {
+    "top": refined_border, "bottom": refined_border, "left": refined_border, "right": refined_border
 }
 
-# Define a logo do documento (usada no DOCX e PDF)
-LOGO_DOC_PATH = "logo.png"
+no_border = {
+    "top": {"sz": 0, "val": "nil", "color": "auto"},
+    "bottom": {"sz": 0, "val": "nil", "color": "auto"},
+    "left": {"sz": 0, "val": "nil", "color": "auto"},
+    "right": {"sz": 0, "val": "nil", "color": "auto"},
+    "insideV": {"sz": 0, "val": "nil", "color": "auto"}
+}
 
 # ==========================================
-# 3. FUNÇÕES DO GERADOR (DOCX)
+# FUNÇÕES UTILITÁRIAS (FORMATAÇÃO WORD)
 # ==========================================
 
-def set_cell_border(cell, **kwargs):
+def set_cell_border_and_shading(cell, border_settings=None, shading_color=None):
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
+
     for element in tcPr.xpath('./w:tcBorders'):
         tcPr.remove(element)
-    tcBorders = OxmlElement('w:tcBorders')
-    for edge in ['top', 'left', 'bottom', 'right']:
-        if edge in kwargs:
-            edge_data = kwargs[edge]
+
+    if border_settings:
+        tcBorders = OxmlElement('w:tcBorders')
+        for edge, data in border_settings.items():
             element = OxmlElement(f"w:{edge}")
-            for key, value in edge_data.items():
+            for key, value in data.items():
                 element.set(qn(f"w:{key}"), str(value))
             tcBorders.append(element)
-    tcPr.append(tcBorders)
+        tcPr.append(tcBorders)
 
-default_border_settings = {
-    "top": {"sz": 4, "val": "single", "color": "000000", "space": "0"},
-    "bottom": {"sz": 4, "val": "single", "color": "000000", "space": "0"},
-    "left": {"sz": 0, "val": "nil", "color": "auto", "space": "0"},
-    "right": {"sz": 0, "val": "nil", "color": "auto", "space": "0"}
-}
+    for element in tcPr.xpath('./w:shd'):
+        tcPr.remove(element)
 
-def create_chapter_cover(doc, chapter_title, cfg):
-    if len(doc.paragraphs) > 0:
-        doc.add_page_break()
-    for _ in range(15):
-        p = doc.add_paragraph("")
-        p.paragraph_format.line_spacing = 1
-    
-    para = doc.add_paragraph()
-    para.paragraph_format.line_spacing = 1
-    run = para.add_run(chapter_title)
-    run.font.name = cfg['font_name']
-    run.font.size = Pt(cfg['h1'])
-    run.font.underline = True
-    run.bold = True
-    para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    
-    for _ in range(7):
-        p = doc.add_paragraph("")
-        p.paragraph_format.line_spacing = 1
-    doc.add_page_break()
+    if shading_color:
+        shd = OxmlElement('w:shd')
+        shd.set(qn('w:val'), 'clear')
+        shd.set(qn('w:fill'), shading_color)
+        tcPr.append(shd)
 
-def create_bordered_section(doc, label, content, cfg, no_bottom_border=False, extra_space_top=Pt(3), extra_space_after_content=Pt(3)):
-    table = doc.add_table(rows=1, cols=1)
-    cell = table.cell(0, 0)
-    cell.text = ''
-    
-    p_title = cell.add_paragraph()
-    p_title.paragraph_format.space_before = extra_space_top
-    p_title.paragraph_format.space_after = Pt(0)
-    run_title = p_title.add_run(f"{label}:")
-    run_title.font.name = cfg['font_name']
-    run_title.bold = True
-    run_title.font.size = Pt(cfg['h2'] - 2)
-    
-    p_content = cell.add_paragraph()
-    p_content.paragraph_format.space_before = Pt(0)
-    p_content.paragraph_format.space_after = extra_space_after_content
-    run_content = p_content.add_run(str(content))
-    run_content.font.name = cfg['font_name']
-    run_content.font.size = Pt(cfg['body'])
-    
-    if label.lower() == "method":
-        p_content.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        cell.add_paragraph("")
-        
-    cell_border_settings = default_border_settings.copy()
-    if no_bottom_border:
-        cell_border_settings.pop("bottom", None)
-    set_cell_border(cell, **cell_border_settings)
+def set_cell_margins(cell, **kwargs):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for edge, value in kwargs.items():
+        mar = OxmlElement(f'w:{edge}')
+        mar.set(qn('w:w'), str(value))
+        mar.set(qn('w:type'), 'dxa')
+        tcMar.append(mar)
+    tcPr.append(tcMar)
 
-def create_test_page(doc, test_info, cfg):
-    doc.add_section(WD_SECTION_START.NEW_PAGE)
-    
-    para_title = doc.add_paragraph()
-    para_title.paragraph_format.line_spacing = 1
-    run_title = para_title.add_run(f"{test_info['Test']}")
-    run_title.font.name = cfg['font_name']
-    run_title.bold = True
-    run_title.font.size = Pt(cfg['h2'])
-    para_title.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-    doc.add_paragraph("")
-    
-    create_bordered_section(doc, "Method", test_info['Method'], cfg, extra_space_top=Pt(1), extra_space_after_content=Pt(3))
-    doc.add_paragraph("")
-    
-    para_steps_title = doc.add_paragraph()
-    para_steps_title.paragraph_format.line_spacing = 1
-    run_steps_title = para_steps_title.add_run("Steps:")
-    run_steps_title.font.name = cfg['font_name']
-    run_steps_title.bold = True
-    run_steps_title.font.size = Pt(cfg['body'] + 1)
-    
-    for step in test_info['Steps']:
-        p_step = doc.add_paragraph(f"{step}")
-        p_step.style.font.name = cfg['font_name']
-        p_step.style.font.size = Pt(cfg['body'])
-        p_step.paragraph_format.line_spacing = 1
-    doc.add_paragraph("")
-    
-    create_bordered_section(doc, "Expected Results", "\n".join(test_info['Expected Results']), cfg,
-                             no_bottom_border=True, extra_space_top=Pt(1), extra_space_after_content=Pt(0))
-    doc.add_paragraph("")
-    
-    table = doc.add_table(rows=1, cols=3)
-    table.style = "Table Grid"
-    
-    def format_cell(c, label, value):
-        p = c.paragraphs[0]
-        p.paragraph_format.line_spacing = 1
-        r1 = p.add_run(label)
-        r1.bold = True
-        r1.font.name = cfg['font_name']
-        r1.font.size = Pt(cfg['body'])
-        if value:
-            r2 = p.add_run(f" {value}")
-            r2.font.name = cfg['font_name']
-            r2.font.size = Pt(cfg['body'])
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+def set_table_indent(table, indent_val=0):
+    tblPr = table._tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement('w:tblPr')
+        table._tbl.insert(0, tblPr)
 
-    format_cell(table.cell(0, 0), "Max Deviation:", "")
-    format_cell(table.cell(0, 1), "Position:", f"< {test_info['Max. Position Deviation (meters)']} meters")
-    format_cell(table.cell(0, 2), "Heading:", f"< {test_info['Max. Heading Deviation (degrees)']} degrees")
-    
-    for row in table.rows:
-        for cell in row.cells:
-            set_cell_border(cell, **default_border_settings)
-            
-    doc.add_paragraph("")
-    
-    para_res_title = doc.add_paragraph()
-    para_res_title.paragraph_format.line_spacing = 1
-    run_res_title = para_res_title.add_run("Results:")
-    run_res_title.font.name = cfg['font_name']
-    run_res_title.bold = True
-    run_res_title.font.size = Pt(cfg['body'] + 1)
-    
-    result_comments = test_info.get('Result + Comment')
-    if result_comments and any(pd.notna(r) and str(r).strip() for r in result_comments):
-        p_res = doc.add_paragraph()
-        p_res.paragraph_format.line_spacing = 1
-        for res in result_comments:
-            if not pd.notna(res): continue
-            texto = str(res).strip()
-            if texto.lower() == "nan" or texto == "": continue
-            
-            run_item = p_res.add_run(texto + "\n")
-            run_item.font.name = cfg['font_name']
-            run_item.font.size = Pt(cfg['body'])
-            
-            if "not as expected" in texto.lower():
-                run_item.bold = True
+    # Layout Fixo
+    layout = OxmlElement('w:tblLayout')
+    layout.set(qn('w:type'), 'fixed')
+    for el in tblPr.xpath("w:tblLayout"): tblPr.remove(el)
+    tblPr.append(layout)
+
+    # Remover espaçamento
+    for element in tblPr.xpath('./w:tblCellSpacing'): tblPr.remove(element)
+    tblCellSpacing = OxmlElement('w:tblCellSpacing')
+    tblCellSpacing.set(qn('w:w'), "0")
+    tblCellSpacing.set(qn('w:type'), "dxa")
+    tblPr.append(tblCellSpacing)
+
+    # Indentação Controlada
+    for el in tblPr.xpath("w:tblInd"): tblPr.remove(el)
+    tblInd = OxmlElement('w:tblInd')
+    tblInd.set(qn('w:w'), str(indent_val))
+    tblInd.set(qn('w:type'), 'dxa')
+    tblPr.append(tblInd)
+
+def create_header(doc, image_path):
+    section = doc.sections[0]
+    section.header_distance = Inches(0.2)
+    header = section.header
+
+    for paragraph in header.paragraphs:
+        p_element = paragraph._element
+        p_element.getparent().remove(p_element)
+
+    p_logo = header.add_paragraph()
+    p_logo.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    p_logo.paragraph_format.space_before = Pt(0)
+    p_logo.paragraph_format.space_after = Pt(0)
+    p_logo.paragraph_format.left_indent = Inches(-0.09)
+
+    if os.path.exists(image_path):
+        run_logo = p_logo.add_run()
+        run_logo.add_picture(image_path, width=Inches(7.5))
     else:
-        doc.add_paragraph("")
-    
-    table_info = doc.add_table(rows=2, cols=3)
-    format_cell(table_info.cell(0,0), "Witness", "")
-    format_cell(table_info.cell(0,1), "Witness", "")
-    format_cell(table_info.cell(0,2), "Date", "")
-    
-    def format_val(c, val):
-        p = c.paragraphs[0]
-        r = p.add_run(str(val) if pd.notna(val) else "")
-        r.font.name = cfg['font_name']
-        r.font.size = Pt(cfg['body'])
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-        
-    format_val(table_info.cell(1,0), test_info['Witness 1'])
-    format_val(table_info.cell(1,1), test_info['Witness 2'])
-    format_val(table_info.cell(1,2), test_info['Date:'])
-    
-    for row in table_info.rows:
-        for cell in row.cells:
-            set_cell_border(cell, **default_border_settings)
+        # Fallback caso a logo não exista, para não quebrar o código
+        run_logo = p_logo.add_run("[LOGO NÃO ENCONTRADO - Verifique se logo.png está no repositório]")
+        run_logo.font.color.rgb = RGBColor(255, 0, 0)
+        run_logo.font.size = Pt(8)
 
-def generate_test_report_docx(excel_file, cfg):
-    sheet_val = cfg['sheet_target']
+def create_details_section(doc, test_info):
+    details_table = doc.add_table(rows=0, cols=1)
+    details_table.width = Inches(7.5)
+    details_table.allow_autofit = False
+
+    set_table_indent(details_table, indent_val=0)
+
+    details_table.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    def _add_box_row(label, content, shading_color, is_placeholder=False):
+        row = details_table.add_row()
+        cell = row.cells[0]
+        cell.width = Inches(7.5)
+        set_cell_margins(cell, top=80, bottom=80, left=120, right=100)
+        set_cell_border_and_shading(cell, border_settings=box_border_settings, shading_color=shading_color)
+        if label:
+            p_label = cell.paragraphs[0]
+            if not p_label.text: p_label.clear()
+            p_label.paragraph_format.space_before = Pt(0); p_label.paragraph_format.space_after = Pt(3)
+            run_label = p_label.add_run(f"{label}:"); run_label.bold = True
+            run_label.font.size = Pt(9); run_label.font.color.rgb = COLOR_TEXT_LABEL
+        p_content = cell.add_paragraph() if label else cell.paragraphs[0]
+        p_content.paragraph_format.space_before = Pt(0); p_content.paragraph_format.space_after = Pt(2)
+        p_content.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+        if is_placeholder:
+            run_content = p_content.add_run(content)
+            run_content.font.italic = True
+            run_content.font.color.rgb = COLOR_TEXT_PLACEHOLDER
+            run_content.font.size = Pt(9)
+        else:
+            lines = str(content).split('\n')
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line: continue
+                match = re.match(r'^(\d+\.)\s*(.*)', line)
+                if match:
+                    num_part = match.group(1); text_part = match.group(2)
+                    r_num = p_content.add_run(num_part + " "); r_num.font.size = Pt(9); r_num.font.color.rgb = COLOR_TEXT_MAIN; r_num.bold = True
+                    r_txt = p_content.add_run(text_part); r_txt.font.size = Pt(9); r_txt.font.color.rgb = COLOR_TEXT_MAIN; r_txt.bold = False
+                else:
+                    r_line = p_content.add_run(line); r_line.font.size = Pt(9); r_line.font.color.rgb = COLOR_TEXT_MAIN
+                if i < len(lines) - 1: p_content.add_run("\n")
+        return p_content
+
+    if test_info.get('Objective'):
+        _add_box_row("Objective", str(test_info['Objective']), COLOR_BG_UNIFIED)
+
+    _add_box_row("Method", test_info['Method'], COLOR_BG_UNIFIED)
+
+    steps_content = "\n".join(str(step) for step in test_info['Steps'])
+    _add_box_row("Steps", steps_content, COLOR_BG_UNIFIED)
+
+    _add_box_row("Expected Results", "\n".join(map(str, test_info['Expected Results'])), COLOR_BG_UNIFIED)
+
+    results_content_str = "\n".join(str(res).strip() for res in test_info.get('Result + Comment', []) if pd.notna(res) and str(res).strip() and str(res).strip().lower() != "nan")
+    if not results_content_str:
+        results_content_str = "No results or comments provided."
+        is_ph = True
+    else:
+        is_ph = False
+    _add_box_row("Results", results_content_str, COLOR_BG_UNIFIED, is_placeholder=is_ph)
+
+    comments_list = test_info.get('Step Comments', [])
+    row = details_table.add_row()
+    cell = row.cells[0]; cell.width = Inches(7.5)
+    set_cell_margins(cell, top=80, bottom=80, left=120, right=100)
+    set_cell_border_and_shading(cell, border_settings=box_border_settings, shading_color=COLOR_BG_UNIFIED)
+
+    p_label = cell.paragraphs[0]
+    if not p_label.text: p_label.clear()
+    p_label.paragraph_format.space_before = Pt(0); p_label.paragraph_format.space_after = Pt(3)
+    run_label = p_label.add_run("Comments:"); run_label.bold = True; run_label.font.size = Pt(9); run_label.font.color.rgb = COLOR_TEXT_LABEL
+    p_content = cell.add_paragraph()
+    p_content.paragraph_format.space_before = Pt(0); p_content.paragraph_format.space_after = Pt(2)
+    p_content.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    if not comments_list:
+        run_ph = p_content.add_run("No additional comments")
+        run_ph.font.italic = True; run_ph.font.size = Pt(9)
+        run_ph.font.color.rgb = COLOR_TEXT_PLACEHOLDER
+    else:
+        for i, item in enumerate(comments_list):
+            run_step = p_content.add_run(f"Step {item['step']}: "); run_step.bold = True; run_step.font.size = Pt(9); run_step.font.color.rgb = COLOR_TEXT_MAIN
+            run_text = p_content.add_run(f"{item['text']}"); run_text.bold = False; run_text.font.size = Pt(9); run_text.font.color.rgb = COLOR_TEXT_MAIN
+            if i < len(comments_list) - 1: p_content.add_run("\n")
+
+def create_test_page(doc, test_info, is_first_test=False, section_title=None):
+    if not is_first_test and len(doc.paragraphs) > 0:
+        doc.add_page_break()
+
+    if section_title:
+        p_sec = doc.add_paragraph()
+        p_sec.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+        p_sec.paragraph_format.space_before = Pt(6); p_sec.paragraph_format.space_after = Pt(14)
+        run_sec = p_sec.add_run(str(section_title))
+        run_sec.font.name = 'Raleway'; run_sec.font.size = Pt(16); run_sec.font.color.rgb = RGBColor(0x0, 0x0, 0x0); run_sec.bold = True
+
+    # --- TABELA AZUL (HEADER) ---
+    table_blue = doc.add_table(rows=1, cols=2)
+    table_blue.width = Inches(7.5)
+    table_blue.allow_autofit = False
+
+    # Indentação negativa para compensar a falta de borda
+    set_table_indent(table_blue, indent_val=-10)
+
+    table_blue.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    table_blue.columns[0].width = Inches(0.8)
+    table_blue.columns[1].width = Inches(6.7)
+
+    cell_lbl = table_blue.cell(0, 0)
+    cell_val = table_blue.cell(0, 1)
+    cell_lbl.width = Inches(0.8)
+    cell_val.width = Inches(6.7)
+
+    set_cell_margins(cell_lbl, top=60, bottom=60, left=100, right=100)
+    set_cell_margins(cell_val, top=60, bottom=60, left=100, right=100)
+
+    p_lbl = cell_lbl.paragraphs[0]
+    run_lbl = p_lbl.add_run("TEST NO:")
+    run_lbl.bold = True; run_lbl.font.size = Pt(10); run_lbl.font.color.rgb = RGBColor(255, 255, 255)
+    p_lbl.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    p_val = cell_val.paragraphs[0]
+    run_val = p_val.add_run(f"{test_info['Test']}")
+    run_val.bold = True; run_val.font.size = Pt(10); run_val.font.color.rgb = RGBColor(255, 255, 255)
+    p_val.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    set_cell_border_and_shading(cell_lbl, border_settings=no_border, shading_color=COLOR_PRIMARY)
+    set_cell_border_and_shading(cell_val, border_settings=no_border, shading_color=COLOR_PRIMARY)
+
+    p_gap_header = doc.add_paragraph()
+    p_gap_header.paragraph_format.space_before = Pt(0)
+    p_gap_header.paragraph_format.space_after = Pt(0)
+    p_gap_header.paragraph_format.line_spacing = Pt(2)
+
+    # --- TABELA FMEA ---
+    table_info = doc.add_table(rows=1, cols=2)
+    table_info.width = Inches(7.49)
+    table_info.allow_autofit = False
+
+    set_table_indent(table_info, indent_val=0)
+
+    table_info.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    table_info.columns[0].width = Inches(3.75)
+    table_info.columns[1].width = Inches(3.74)
+
+    cell_fmea = table_info.cell(0, 0)
+    cell_sub = table_info.cell(0, 1)
+
+    cell_fmea.width = Inches(3.75)
+    cell_sub.width = Inches(3.74)
+
+    set_cell_margins(cell_fmea, top=60, bottom=60, left=100, right=100)
+    set_cell_margins(cell_sub, top=60, bottom=60, left=100, right=100)
+
+    p_fmea = cell_fmea.paragraphs[0]
+    run_fmea = p_fmea.add_run("FMEA Reference: "); run_fmea.bold = True; run_fmea.font.size = Pt(9); run_fmea.font.color.rgb = COLOR_TEXT_MAIN
+    p_fmea.add_run(str(test_info.get('FMEA Reference', '-'))).font.size = Pt(9); p_fmea.runs[-1].font.color.rgb = COLOR_TEXT_MAIN
+
+    set_cell_border_and_shading(cell_fmea, border_settings=box_border_settings, shading_color=COLOR_BG_UNIFIED)
+
+    p_sub = cell_sub.paragraphs[0]
+    run_sub = p_sub.add_run("Sub-System: "); run_sub.bold = True; run_sub.font.size = Pt(9); run_sub.font.color.rgb = COLOR_TEXT_MAIN
+    p_sub.add_run(str(test_info.get('Sub-System', '-'))).font.size = Pt(9); p_sub.runs[-1].font.color.rgb = COLOR_TEXT_MAIN
+
+    set_cell_border_and_shading(cell_sub, border_settings=box_border_settings, shading_color=COLOR_BG_UNIFIED)
+
+    create_details_section(doc, test_info)
+
+    p_gap_footer = doc.add_paragraph()
+    p_gap_footer.paragraph_format.space_before = Pt(0)
+    p_gap_footer.paragraph_format.space_after = Pt(0)
+    p_gap_footer.paragraph_format.line_spacing = Pt(2)
+
+    # --- TABELA ASSINATURAS ---
+    table_witness = doc.add_table(rows=1, cols=2)
+    table_witness.width = Inches(7.5)
+    table_witness.allow_autofit = False
+
+    set_table_indent(table_witness, indent_val=-10)
+
+    table_witness.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    table_witness.columns[0].width = Inches(5.0)
+    table_witness.columns[1].width = Inches(2.5)
+
+    cell_wit = table_witness.cell(0, 0)
+    cell_dat = table_witness.cell(0, 1)
+
+    cell_wit.width = Inches(5.0)
+    cell_dat.width = Inches(2.5)
+
+    set_cell_margins(cell_wit, top=60, bottom=60, left=100, right=100)
+    set_cell_margins(cell_dat, top=60, bottom=60, left=100, right=100)
+
+    p_wit = cell_wit.paragraphs[0]
+    run_wit_lbl = p_wit.add_run("Witnessed by: "); run_wit_lbl.bold = True; run_wit_lbl.font.size = Pt(9); run_wit_lbl.font.color.rgb = RGBColor(255, 255, 255)
+    run_wit_val = p_wit.add_run(str(test_info.get('Witness 1', '-'))); run_wit_val.bold = True; run_wit_val.font.size = Pt(9); run_wit_val.font.color.rgb = RGBColor(255, 255, 255)
+    p_wit.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    p_dat = cell_dat.paragraphs[0]
+    run_dat_lbl = p_dat.add_run("Date: "); run_dat_lbl.bold = True; run_dat_lbl.font.size = Pt(9); run_dat_lbl.font.color.rgb = RGBColor(255, 255, 255)
+
+    raw_date = test_info.get('Date:')
+    date_value = str(raw_date).strip() if pd.notna(raw_date) and str(raw_date).lower() != 'nan' else '-'
+
+    run_dat_val = p_dat.add_run(date_value)
+    run_dat_val.bold = True; run_dat_val.font.size = Pt(9); run_dat_val.font.color.rgb = RGBColor(255, 255, 255)
+    p_dat.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    set_cell_border_and_shading(cell_wit, border_settings=no_border, shading_color=COLOR_PRIMARY)
+    set_cell_border_and_shading(cell_dat, border_settings=no_border, shading_color=COLOR_PRIMARY)
+
+
+def generate_professional_docx(uploaded_file):
+    # 1. Ler o Excel
     try:
-        sheet_target = int(sheet_val)
-    except ValueError:
-        sheet_target = sheet_val
-        
-    try:
-        df = pd.read_excel(excel_file, sheet_name=sheet_target, header=0)
-    except ValueError:
-        st.error(f"❌ Erro: Não foi possível encontrar a aba '{sheet_target}' na planilha. Verifique o nome ou índice no menu lateral.")
-        return None
+        df = pd.read_excel(uploaded_file, sheet_name=0, header=0, dtype={'test number': str})
     except Exception as e:
-        st.error(f"❌ Erro ao ler Excel: {e}")
+        st.error(f"Erro ao ler o arquivo Excel: {e}")
         return None
 
     grouped_tests = {}
-    for _, row in df.iterrows():
-        if pd.isna(row.get('test number')): continue
-        test_number = row['test number']
-        if test_number not in grouped_tests:
-            grouped_tests[test_number] = {
-                'Test': row.get('Test', ''),
-                'Method': row.get('Method', ''),
-                'Steps': [],
-                'Expected Results': [],
-                'Result + Comment': [],
-                'Max. Position Deviation (meters)': row.get('Max. Position Deviation (meters)', ''),
-                'Max. Heading Deviation (degrees)': row.get('Max. Heading Deviation (degrees)', ''),
-                'Witness 1': row.get('Witness 1', ''),
-                'Witness 2': row.get('Witness 2', ''),
-                'Date:': row.get('Date:', ''),
-                'Section': row.get('Section', 'General')
-            }
-        grouped_tests[test_number]['Steps'].append(row.get('Step', ''))
-        grouped_tests[test_number]['Expected Results'].append(row.get('Expected Result', ''))
-        grouped_tests[test_number]['Result + Comment'].append(row.get('Result + Comment', ''))
+    if not df.empty:
+        for _, row in df.iterrows():
+            chapter_title = row.get('Section', 'Section Name')
+            test_number = row.get('test number', '000')
+            
+            # Pula se não tiver número de teste
+            if pd.isna(test_number): continue
 
+            if test_number not in grouped_tests:
+                grouped_tests[test_number] = {
+                    'Test': row.get('Test', 'Test Title'), 
+                    'Method': row.get('Method', ''), 
+                    'Steps': [],
+                    'Expected Results': [], 
+                    'Result + Comment': [], 
+                    'Step Comments': [],
+                    'Witness 1': row.get('Witness 1', ''), 
+                    'Date:': row.get('Date', ''), 
+                    'Section': chapter_title,
+                    'FMEA Reference': row.get('FMEA Reference', ''), 
+                    'Sub-System': row.get('Sub-System', ''),
+                    'Objective': row.get('Objective', '')
+                }
+            grouped_tests[test_number]['Steps'].append(row.get('Step', ''))
+            
+            # Comentários de Auditoria
+            current_step_num = len(grouped_tests[test_number]['Steps'])
+            auditor_comment = row.get('Auditor FMEA Comment')
+            if pd.notna(auditor_comment) and str(auditor_comment).strip():
+                grouped_tests[test_number]['Step Comments'].append({'step': current_step_num, 'text': str(auditor_comment).strip()})
+            
+            grouped_tests[test_number]['Expected Results'].append(row.get('Expected Result', ''))
+            grouped_tests[test_number]['Result + Comment'].append(row.get('Result + Comment', ''))
+
+    # 2. Criar Documento
     doc = Document()
-    
-    # ----------------------------------------------------
-    # INSERÇÃO DA LOGO NO CABEÇALHO DO WORD
-    # ----------------------------------------------------
-    if os.path.exists(LOGO_DOC_PATH):
-        try:
-            # Acessa o cabeçalho da primeira seção (padrão)
-            section = doc.sections[0]
-            header = section.header
-            p_header = header.paragraphs[0]
-            r_header = p_header.add_run()
-            # Ajusta tamanho da logo (1.5 polegadas é um bom padrão)
-            r_header.add_picture(LOGO_DOC_PATH, width=Inches(1.5))
-        except Exception as e:
-            st.warning(f"Não foi possível inserir a logo no Word: {e}")
+    normal_style = doc.styles['Normal']
+    normal_style.font.name = 'Raleway'
+    normal_style.font.size = Pt(10)
+    normal_style.paragraph_format.space_before = Pt(0)
+    normal_style.paragraph_format.space_after = Pt(0)
+    normal_style.paragraph_format.line_spacing = 1.15
 
-    # Configuração de Estilo Global
-    style = doc.styles['Normal']
-    style.font.name = cfg['font_name']
-    style.font.size = Pt(cfg['body'])
-    
-    # Configuração de Margens
-    for section in doc.sections:
-        section.top_margin = Inches(cfg['m_top'])
-        section.bottom_margin = Inches(cfg['m_bottom'])
-        section.left_margin = Inches(cfg['m_left'])
-        section.right_margin = Inches(cfg['m_right'])
-        
+    section = doc.sections[0]
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(0.5)
+    section.right_margin = Inches(0.5)
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11.0)
+
+    # Header com logo
+    create_header(doc, LOGO_PATH)
+
+    # Título Principal
+    main_title_para = doc.add_paragraph()
+    main_title_run = main_title_para.add_run("APPENDIX B - DP ANNUAL TRIALS TESTS")
+    main_title_run.font.name = 'Raleway'
+    main_title_run.font.size = Pt(20)
+    main_title_run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    main_title_run.bold = True
+    main_title_para.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    main_title_para.paragraph_format.space_after = Pt(24)
+
+    first_iteration = True
     current_chapter = None
-    for test_info in grouped_tests.values():
-        if current_chapter != test_info['Section']:
-            create_chapter_cover(doc, str(test_info['Section']), cfg)
-            current_chapter = test_info['Section']
-        create_test_page(doc, test_info, cfg)
-        
+    
+    if grouped_tests:
+        for test_number, test_info in grouped_tests.items():
+            test_info['test number'] = test_number
+            if test_info['Section'] != current_chapter:
+                current_chapter = test_info['Section']
+                create_test_page(doc, test_info, is_first_test=first_iteration, section_title=current_chapter)
+            else:
+                create_test_page(doc, test_info, is_first_test=first_iteration, section_title=None)
+            first_iteration = False
+
+    # Salvar em buffer
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
 # ==========================================
-# 4. FUNÇÕES DO MESCLADOR (PDF)
+# INTERFACE DO USUÁRIO
 # ==========================================
 
-def read_pdf_overlay_params(excel_file, sheet_target):
-    try:
-        try:
-            st_target = int(sheet_target)
-        except:
-            st_target = sheet_target
-        df = pd.read_excel(excel_file, sheet_name=st_target)
-        nome_barco = df["Vessel"].iloc[0] if "Vessel" in df.columns else "Vessel Name"
-        tipo_teste = df["Type"].iloc[0] if "Type" in df.columns else "Trials"
-        mes_ano = df["Year"].iloc[0] if "Year" in df.columns else "202X"
-        rodape_dir = df["Abreviation"].iloc[0] if "Abreviation" in df.columns else "DOC"
-        rodape_esq = "Bram DP Assurance"
-        rodape_center = ""
-        return nome_barco, tipo_teste, mes_ano, rodape_esq, rodape_center, rodape_dir
-    except Exception as e:
-        st.error(f"Erro ao ler parâmetros do Excel para o PDF: {e}")
-        return None
+# Logo na Interface Streamlit
+if os.path.exists('bram_logo.png'):
+     col1, col2, col3 = st.columns([1, 2, 1])
+     with col2:
+         st.image('bram_logo.png', use_container_width=True)
 
-def create_overlay(page_width, page_height, page_number, params, font_name="Helvetica"):
-    (nome_barco, tipo_teste, mes_ano, rodape_esq, rodape_center, rodape_dir) = params
-    packet = io.BytesIO()
-    c = canvas.Canvas(packet, pagesize=(page_width, page_height))
-    
-    margem = 40
-    altura_cabecalho = page_height - 30
-    
-    font_pdf = "Helvetica" 
-    if font_name in ["Times-Roman", "Courier", "Helvetica"]:
-        font_pdf = font_name
-        
-    # ----------------------------------------------------
-    # INSERÇÃO DA LOGO NO OVERLAY DO PDF
-    # ----------------------------------------------------
-    if os.path.exists(LOGO_DOC_PATH):
-        try:
-            # Desenha a logo no canto superior esquerdo
-            # Ajuste as coordenadas (x, y, width, height) conforme necessário
-            # Ex: x=40 (margem), y=altura_cabecalho - 15 (para ficar alinhado)
-            logo_width = 80
-            logo_height = 30
-            c.drawImage(LOGO_DOC_PATH, x=margem, y=altura_cabecalho - 5, width=logo_width, height=logo_height, preserveAspectRatio=True, mask='auto')
+st.title("Gerador de Relatórios DP - Padrão Profissional")
+st.markdown("Faça o upload da planilha Excel para gerar o relatório formatado (Apêndice B).")
+
+uploaded_file = st.file_uploader("Upload Planilha (.xlsx)", type=["xlsx"])
+
+if uploaded_file:
+    if st.button("Gerar Relatório DOCX", type="primary"):
+        with st.spinner("Processando formatação avançada..."):
+            docx_buffer = generate_professional_docx(uploaded_file)
             
-            # Ajusta o texto do nome do barco para não ficar em cima da logo
-            c.setFont(font_pdf, 12)
-            # Desloca o nome do barco um pouco para a direita
-            c.drawString(margem + logo_width + 10, altura_cabecalho, str(nome_barco))
-            
-        except Exception as e:
-            # Fallback se a imagem der erro, desenha só o texto normal
-            c.setFont(font_pdf, 12)
-            c.drawString(margem, altura_cabecalho, str(nome_barco))
-    else:
-        # Sem logo, desenha normal
-        c.setFont(font_pdf, 12)
-        c.drawString(margem, altura_cabecalho, str(nome_barco))
-
-    c.drawCentredString(page_width / 2, altura_cabecalho, str(tipo_teste))
-    c.drawRightString(page_width - margem, altura_cabecalho, str(mes_ano))
-    
-    c.setFont(font_pdf, 10)
-    altura_rodape = 20
-    c.drawString(margem, altura_rodape, str(rodape_esq))
-    c.drawCentredString(page_width / 2, altura_rodape, f"{rodape_center} {page_number}")
-    c.drawRightString(page_width - margem, altura_rodape, str(rodape_dir))
-    
-    c.save()
-    packet.seek(0)
-    return PdfReader(packet)
-
-def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t1, \
-         tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t2:
-        t1.write(doc1_bytes.read())
-        t2.write(doc2_bytes.read())
-        path1, path2 = t1.name, t2.name
-
-    params = read_pdf_overlay_params(excel_bytes, cfg['sheet_target'])
-    if not params: return None
-    
-    reader2 = PdfReader(path2)
-    writer2 = PdfWriter()
-    for page in reader2.pages:
-        txt = page.extract_text()
-        if txt and txt.strip():
-            writer2.add_page(page)
-    
-    path2_clean = path2 + "_clean.pdf"
-    with open(path2_clean, "wb") as f:
-        writer2.write(f)
-        
-    merger = PdfMerger()
-    merger.append(path1)
-    merger.append(path2_clean)
-    
-    path_merged = path1 + "_merged.pdf"
-    merger.write(path_merged)
-    merger.close()
-    
-    reader_merged = PdfReader(path_merged)
-    writer_final = PdfWriter()
-    
-    for i, page in enumerate(reader_merged.pages, start=1):
-        pw = float(page.mediabox.width)
-        ph = float(page.mediabox.height)
-        overlay = create_overlay(pw, ph, i, params)
-        page.merge_page(overlay.pages[0])
-        writer_final.add_page(page)
-        
-    final_buffer = io.BytesIO()
-    writer_final.write(final_buffer)
-    final_buffer.seek(0)
-    
-    for p in [path1, path2, path2_clean, path_merged]:
-        if os.path.exists(p): os.remove(p)
-        
-    return final_buffer
-
-# ==========================================
-# 5. INTERFACE PRINCIPAL
-# ==========================================
-
-# Define a logo do SITE
-LOGO_SITE_PATH = "bram_logo.png"
-
-col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
-
-# Verifica se a logo do site existe para exibição
-if os.path.exists(LOGO_SITE_PATH):
-    with col_logo2:
-        st.image(LOGO_SITE_PATH, use_container_width=True)
-else:
-    # Se não achar a bram_logo, tenta a logo.png como fallback para não ficar vazio
-    if os.path.exists(LOGO_DOC_PATH):
-         with col_logo2:
-            st.image(LOGO_DOC_PATH, use_container_width=True)
-
-st.markdown("<h1 style='text-align: center;'>Gerador de Relatórios DP</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: gray;'>Bram Offshore | Edison Chouest Offshore</p>", unsafe_allow_html=True)
-st.markdown("---")
-
-# --- ABAS ---
-tab1, tab2 = st.tabs(["📄 1. Gerar Relatório (DOCX)", "📑 2. Mesclar e Finalizar (PDF)"])
-
-with tab1:
-    st.info("Passo 1: Faça upload da planilha preenchida para gerar o relatório em Word.")
-    uploaded_excel = st.file_uploader("Upload Planilha Excel (.xlsx)", type=["xlsx"], key="u_excel_docx")
-    
-    if uploaded_excel:
-        if st.button("Gerar Relatório DOCX", type="primary"):
-            with st.spinner("Processando dados e gerando documento..."):
-                docx_buffer = generate_test_report_docx(uploaded_excel, CONFIG)
-                if docx_buffer:
-                    st.success("Relatório gerado com sucesso!")
-                    st.download_button(
-                        label="⬇️ Baixar test_report.docx",
-                        data=docx_buffer,
-                        file_name="test_report.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
-
-with tab2:
-    st.info("Passo 2: Junte a parte inicial (Capa/Intro) com o relatório gerado acima.")
-    col_up1, col_up2 = st.columns(2)
-    pdf1 = col_up1.file_uploader("Parte 1 (Capa/Intro .pdf)", type=["pdf"])
-    pdf2 = col_up2.file_uploader("Parte 2 (Relatório Gerado .pdf)", type=["pdf"], help="Converta o DOCX gerado na aba anterior para PDF antes de subir aqui.")
-    excel_params = st.file_uploader("Planilha Excel (Para pegar Nome do Barco/Ano)", type=["xlsx"], key="u_excel_pdf")
-    
-    if pdf1 and pdf2 and excel_params:
-        if st.button("Mesclar e Adicionar Cabeçalhos", type="primary"):
-            with st.spinner("Mesclando arquivos e aplicando layout..."):
-                final_pdf = processar_pdf_final(pdf1, pdf2, excel_params, CONFIG)
-                if final_pdf:
-                    st.success("PDF Final pronto!")
-                    st.download_button(
-                        label="⬇️ Baixar Relatório Final.pdf",
-                        data=final_pdf,
-                        file_name="Relatorio_Final_DP.pdf",
-                        mime="application/pdf"
-                    )
+            if docx_buffer:
+                st.success("Relatório gerado com sucesso!")
+                st.download_button(
+                    label="⬇️ Baixar test_report_professional.docx",
+                    data=docx_buffer,
+                    file_name="test_report_professional.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
