@@ -19,6 +19,7 @@ from PyPDF2 import PdfReader, PdfWriter, PdfMerger
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
@@ -67,10 +68,10 @@ st.sidebar.subheader("Margens (Polegadas)")
 col_m1, col_m2 = st.sidebar.columns(2)
 margin_top = col_m1.number_input("Topo", value=1.0, step=0.1)
 margin_bottom = col_m2.number_input("Rodapé", value=1.0, step=0.1)
-margin_left = col_m1.number_input("Esquerda", value=0.2, step=0.1)
-margin_right = col_m2.number_input("Direita", value=0.2, step=0.1)
+margin_left = col_m1.number_input("Esquerda", value=0.5, step=0.1)
+margin_right = col_m2.number_input("Direita", value=0.5, step=0.1)
 
-# Agrupando configurações para passar para as funções
+# Agrupando configurações
 CONFIG = {
     "sheet_target": sheet_input,
     "font_name": font_name_cfg,
@@ -83,12 +84,14 @@ CONFIG = {
     "m_right": margin_right
 }
 
+# Define a logo do documento (usada no DOCX e PDF)
+LOGO_DOC_PATH = "logo.png"
+
 # ==========================================
 # 3. FUNÇÕES DO GERADOR (DOCX)
 # ==========================================
 
 def set_cell_border(cell, **kwargs):
-    """Função auxiliar para bordas de tabela no Word"""
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
     for element in tcPr.xpath('./w:tcBorders'):
@@ -113,15 +116,15 @@ default_border_settings = {
 def create_chapter_cover(doc, chapter_title, cfg):
     if len(doc.paragraphs) > 0:
         doc.add_page_break()
-    for _ in range(20):
+    for _ in range(15):
         p = doc.add_paragraph("")
         p.paragraph_format.line_spacing = 1
     
     para = doc.add_paragraph()
     para.paragraph_format.line_spacing = 1
     run = para.add_run(chapter_title)
-    run.font.name = cfg['font_name'] # Usa configuração
-    run.font.size = Pt(cfg['h1'])    # Usa configuração
+    run.font.name = cfg['font_name']
+    run.font.size = Pt(cfg['h1'])
     run.font.underline = True
     run.bold = True
     para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -136,16 +139,14 @@ def create_bordered_section(doc, label, content, cfg, no_bottom_border=False, ex
     cell = table.cell(0, 0)
     cell.text = ''
     
-    # Título da Seção
     p_title = cell.add_paragraph()
     p_title.paragraph_format.space_before = extra_space_top
     p_title.paragraph_format.space_after = Pt(0)
     run_title = p_title.add_run(f"{label}:")
     run_title.font.name = cfg['font_name']
     run_title.bold = True
-    run_title.font.size = Pt(cfg['h2'] - 2) # Um pouco menor que o H2 padrão
+    run_title.font.size = Pt(cfg['h2'] - 2)
     
-    # Conteúdo
     p_content = cell.add_paragraph()
     p_content.paragraph_format.space_before = Pt(0)
     p_content.paragraph_format.space_after = extra_space_after_content
@@ -165,7 +166,6 @@ def create_bordered_section(doc, label, content, cfg, no_bottom_border=False, ex
 def create_test_page(doc, test_info, cfg):
     doc.add_section(WD_SECTION_START.NEW_PAGE)
     
-    # Título do Teste
     para_title = doc.add_paragraph()
     para_title.paragraph_format.line_spacing = 1
     run_title = para_title.add_run(f"{test_info['Test']}")
@@ -175,11 +175,9 @@ def create_test_page(doc, test_info, cfg):
     para_title.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
     doc.add_paragraph("")
     
-    # Method
     create_bordered_section(doc, "Method", test_info['Method'], cfg, extra_space_top=Pt(1), extra_space_after_content=Pt(3))
     doc.add_paragraph("")
     
-    # Steps
     para_steps_title = doc.add_paragraph()
     para_steps_title.paragraph_format.line_spacing = 1
     run_steps_title = para_steps_title.add_run("Steps:")
@@ -194,12 +192,10 @@ def create_test_page(doc, test_info, cfg):
         p_step.paragraph_format.line_spacing = 1
     doc.add_paragraph("")
     
-    # Expected Results
     create_bordered_section(doc, "Expected Results", "\n".join(test_info['Expected Results']), cfg,
                              no_bottom_border=True, extra_space_top=Pt(1), extra_space_after_content=Pt(0))
     doc.add_paragraph("")
     
-    # Tabela de Desvios
     table = doc.add_table(rows=1, cols=3)
     table.style = "Table Grid"
     
@@ -226,7 +222,6 @@ def create_test_page(doc, test_info, cfg):
             
     doc.add_paragraph("")
     
-    # Results + Comments
     para_res_title = doc.add_paragraph()
     para_res_title.paragraph_format.line_spacing = 1
     run_res_title = para_res_title.add_run("Results:")
@@ -252,14 +247,11 @@ def create_test_page(doc, test_info, cfg):
     else:
         doc.add_paragraph("")
     
-    # Footer Table (Witness/Date)
     table_info = doc.add_table(rows=2, cols=3)
-    # Header row
     format_cell(table_info.cell(0,0), "Witness", "")
     format_cell(table_info.cell(0,1), "Witness", "")
     format_cell(table_info.cell(0,2), "Date", "")
     
-    # Value row
     def format_val(c, val):
         p = c.paragraphs[0]
         r = p.add_run(str(val) if pd.notna(val) else "")
@@ -276,10 +268,7 @@ def create_test_page(doc, test_info, cfg):
             set_cell_border(cell, **default_border_settings)
 
 def generate_test_report_docx(excel_file, cfg):
-    # 1. TENTA LER A PLANILHA COM O SHEET NAME CONFIGURADO
     sheet_val = cfg['sheet_target']
-    
-    # Tenta converter para int (índice), se falhar usa string (nome)
     try:
         sheet_target = int(sheet_val)
     except ValueError:
@@ -294,12 +283,9 @@ def generate_test_report_docx(excel_file, cfg):
         st.error(f"❌ Erro ao ler Excel: {e}")
         return None
 
-    # Processamento dos dados
     grouped_tests = {}
     for _, row in df.iterrows():
-        # Verificação de segurança para linhas vazias
         if pd.isna(row.get('test number')): continue
-        
         test_number = row['test number']
         if test_number not in grouped_tests:
             grouped_tests[test_number] = {
@@ -319,9 +305,23 @@ def generate_test_report_docx(excel_file, cfg):
         grouped_tests[test_number]['Expected Results'].append(row.get('Expected Result', ''))
         grouped_tests[test_number]['Result + Comment'].append(row.get('Result + Comment', ''))
 
-    # Criação do DOCX
     doc = Document()
     
+    # ----------------------------------------------------
+    # INSERÇÃO DA LOGO NO CABEÇALHO DO WORD
+    # ----------------------------------------------------
+    if os.path.exists(LOGO_DOC_PATH):
+        try:
+            # Acessa o cabeçalho da primeira seção (padrão)
+            section = doc.sections[0]
+            header = section.header
+            p_header = header.paragraphs[0]
+            r_header = p_header.add_run()
+            # Ajusta tamanho da logo (1.5 polegadas é um bom padrão)
+            r_header.add_picture(LOGO_DOC_PATH, width=Inches(1.5))
+        except Exception as e:
+            st.warning(f"Não foi possível inserir a logo no Word: {e}")
+
     # Configuração de Estilo Global
     style = doc.styles['Normal']
     style.font.name = cfg['font_name']
@@ -341,7 +341,6 @@ def generate_test_report_docx(excel_file, cfg):
             current_chapter = test_info['Section']
         create_test_page(doc, test_info, cfg)
         
-    # Salvar em memória
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -350,7 +349,6 @@ def generate_test_report_docx(excel_file, cfg):
 # ==========================================
 # 4. FUNÇÕES DO MESCLADOR (PDF)
 # ==========================================
-# (Mantendo a lógica original, mas adaptada para Streamlit)
 
 def read_pdf_overlay_params(excel_file, sheet_target):
     try:
@@ -358,9 +356,7 @@ def read_pdf_overlay_params(excel_file, sheet_target):
             st_target = int(sheet_target)
         except:
             st_target = sheet_target
-            
         df = pd.read_excel(excel_file, sheet_name=st_target)
-        # Pega a primeira linha
         nome_barco = df["Vessel"].iloc[0] if "Vessel" in df.columns else "Vessel Name"
         tipo_teste = df["Type"].iloc[0] if "Type" in df.columns else "Trials"
         mes_ano = df["Year"].iloc[0] if "Year" in df.columns else "202X"
@@ -380,13 +376,36 @@ def create_overlay(page_width, page_height, page_number, params, font_name="Helv
     margem = 40
     altura_cabecalho = page_height - 30
     
-    # Tenta usar a fonte configurada se for padrão, senão fallback
     font_pdf = "Helvetica" 
     if font_name in ["Times-Roman", "Courier", "Helvetica"]:
         font_pdf = font_name
         
-    c.setFont(font_pdf, 12)
-    c.drawString(margem, altura_cabecalho, str(nome_barco))
+    # ----------------------------------------------------
+    # INSERÇÃO DA LOGO NO OVERLAY DO PDF
+    # ----------------------------------------------------
+    if os.path.exists(LOGO_DOC_PATH):
+        try:
+            # Desenha a logo no canto superior esquerdo
+            # Ajuste as coordenadas (x, y, width, height) conforme necessário
+            # Ex: x=40 (margem), y=altura_cabecalho - 15 (para ficar alinhado)
+            logo_width = 80
+            logo_height = 30
+            c.drawImage(LOGO_DOC_PATH, x=margem, y=altura_cabecalho - 5, width=logo_width, height=logo_height, preserveAspectRatio=True, mask='auto')
+            
+            # Ajusta o texto do nome do barco para não ficar em cima da logo
+            c.setFont(font_pdf, 12)
+            # Desloca o nome do barco um pouco para a direita
+            c.drawString(margem + logo_width + 10, altura_cabecalho, str(nome_barco))
+            
+        except Exception as e:
+            # Fallback se a imagem der erro, desenha só o texto normal
+            c.setFont(font_pdf, 12)
+            c.drawString(margem, altura_cabecalho, str(nome_barco))
+    else:
+        # Sem logo, desenha normal
+        c.setFont(font_pdf, 12)
+        c.drawString(margem, altura_cabecalho, str(nome_barco))
+
     c.drawCentredString(page_width / 2, altura_cabecalho, str(tipo_teste))
     c.drawRightString(page_width - margem, altura_cabecalho, str(mes_ano))
     
@@ -401,18 +420,15 @@ def create_overlay(page_width, page_height, page_number, params, font_name="Helv
     return PdfReader(packet)
 
 def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
-    # 1. Salva arquivos temporários (necessário para PyPDF2/File I/O)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t1, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t2:
         t1.write(doc1_bytes.read())
         t2.write(doc2_bytes.read())
         path1, path2 = t1.name, t2.name
 
-    # 2. Ler parâmetros do Excel
     params = read_pdf_overlay_params(excel_bytes, cfg['sheet_target'])
     if not params: return None
     
-    # 3. Remover páginas em branco do Doc2
     reader2 = PdfReader(path2)
     writer2 = PdfWriter()
     for page in reader2.pages:
@@ -424,7 +440,6 @@ def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
     with open(path2_clean, "wb") as f:
         writer2.write(f)
         
-    # 4. Mesclar (Doc1 + Doc2 limpo)
     merger = PdfMerger()
     merger.append(path1)
     merger.append(path2_clean)
@@ -433,15 +448,12 @@ def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
     merger.write(path_merged)
     merger.close()
     
-    # 5. Adicionar Overlay (Cabeçalho e Rodapé)
     reader_merged = PdfReader(path_merged)
     writer_final = PdfWriter()
     
     for i, page in enumerate(reader_merged.pages, start=1):
         pw = float(page.mediabox.width)
         ph = float(page.mediabox.height)
-        
-        # Cria overlay para esta página
         overlay = create_overlay(pw, ph, i, params)
         page.merge_page(overlay.pages[0])
         writer_final.add_page(page)
@@ -450,7 +462,6 @@ def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
     writer_final.write(final_buffer)
     final_buffer.seek(0)
     
-    # Limpeza
     for p in [path1, path2, path2_clean, path_merged]:
         if os.path.exists(p): os.remove(p)
         
@@ -460,20 +471,20 @@ def processar_pdf_final(doc1_bytes, doc2_bytes, excel_bytes, cfg):
 # 5. INTERFACE PRINCIPAL
 # ==========================================
 
-# --- LOGOTIPOS ---
+# Define a logo do SITE
+LOGO_SITE_PATH = "bram_logo.png"
+
 col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
 
-# Tenta carregar as logos se existirem
-logo_files = ["logo.png", "bram_logo.png", "Logo tradicional.png"]
-found_logo = None
-for f in logo_files:
-    if os.path.exists(f):
-        found_logo = f
-        break
-
-if found_logo:
+# Verifica se a logo do site existe para exibição
+if os.path.exists(LOGO_SITE_PATH):
     with col_logo2:
-        st.image(found_logo, use_container_width=True)
+        st.image(LOGO_SITE_PATH, use_container_width=True)
+else:
+    # Se não achar a bram_logo, tenta a logo.png como fallback para não ficar vazio
+    if os.path.exists(LOGO_DOC_PATH):
+         with col_logo2:
+            st.image(LOGO_DOC_PATH, use_container_width=True)
 
 st.markdown("<h1 style='text-align: center;'>Gerador de Relatórios DP</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: gray;'>Bram Offshore | Edison Chouest Offshore</p>", unsafe_allow_html=True)
@@ -482,17 +493,14 @@ st.markdown("---")
 # --- ABAS ---
 tab1, tab2 = st.tabs(["📄 1. Gerar Relatório (DOCX)", "📑 2. Mesclar e Finalizar (PDF)"])
 
-# ABA 1: GERAR DOCX
 with tab1:
     st.info("Passo 1: Faça upload da planilha preenchida para gerar o relatório em Word.")
-    
     uploaded_excel = st.file_uploader("Upload Planilha Excel (.xlsx)", type=["xlsx"], key="u_excel_docx")
     
     if uploaded_excel:
         if st.button("Gerar Relatório DOCX", type="primary"):
             with st.spinner("Processando dados e gerando documento..."):
                 docx_buffer = generate_test_report_docx(uploaded_excel, CONFIG)
-                
                 if docx_buffer:
                     st.success("Relatório gerado com sucesso!")
                     st.download_button(
@@ -502,21 +510,17 @@ with tab1:
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
 
-# ABA 2: MESCLAR PDF
 with tab2:
     st.info("Passo 2: Junte a parte inicial (Capa/Intro) com o relatório gerado acima.")
-    
     col_up1, col_up2 = st.columns(2)
     pdf1 = col_up1.file_uploader("Parte 1 (Capa/Intro .pdf)", type=["pdf"])
     pdf2 = col_up2.file_uploader("Parte 2 (Relatório Gerado .pdf)", type=["pdf"], help="Converta o DOCX gerado na aba anterior para PDF antes de subir aqui.")
-    
     excel_params = st.file_uploader("Planilha Excel (Para pegar Nome do Barco/Ano)", type=["xlsx"], key="u_excel_pdf")
     
     if pdf1 and pdf2 and excel_params:
         if st.button("Mesclar e Adicionar Cabeçalhos", type="primary"):
             with st.spinner("Mesclando arquivos e aplicando layout..."):
                 final_pdf = processar_pdf_final(pdf1, pdf2, excel_params, CONFIG)
-                
                 if final_pdf:
                     st.success("PDF Final pronto!")
                     st.download_button(
